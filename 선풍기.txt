@@ -1,0 +1,157 @@
+module control_led(
+    input clk,
+    input reset_p,
+    input [3:0] btn,
+    output [15:0] led_debug, // 16개의 PWM 출력
+    output reg led_r,          // 색상을 담당하는 output
+    output reg led_g,
+    output reg led_b,
+    output motor_pwm         // PWM 신호 출력 모터의 속도를 제어하는 데 사용
+);
+
+
+    // 버튼 입력 처리----------------------------------------------------------------------------------------------------------
+    wire btn_sple, btn_light, btn_timer, btn_fmode;
+    button_cntr btn0(.clk(clk), .reset_p(reset_p), .btn(btn[0]), .btn_pedge(btn_sple));
+    button_cntr btn1(.clk(clk), .reset_p(reset_p), .btn(btn[1]), .btn_pedge(btn_light)); 
+    button_cntr btn2(.clk(clk), .reset_p(reset_p), .btn(btn[2]), .btn_pedge(btn_timer));
+    button_cntr btn3(.clk(clk), .reset_p(reset_p), .btn(btn[3]), .btn_pedge(btn_fmode));
+    //------------------------------------------------------------------------------------------------------------------------
+
+
+    // 속도 제어 엣지 검출-----------------------------------------------------------------------------------------------------
+    wire speed_nedge;
+    edge_detector_n ed(
+        .clk(clk), .reset_p(reset_p), .cp(btn_sple),
+        .n_edge(speed_nedge)
+    );
+
+    // 듀티 사이클 설정 (모터 속도 제어)
+    reg [5:0] motor_duty; // 0부터 63(6'b111111)까지의 값을 가질 수 있다.
+    reg [6:0] led_duty;   // 0부터 127(7'b1111111)까지의 값을 가질 수 있다.
+    always @(posedge clk or posedge reset_p) begin
+        if (reset_p) motor_duty <= 0;
+        else if (speed_nedge) begin
+            if (motor_duty >= 63) 
+                motor_duty <= 0;
+            else 
+                motor_duty <= motor_duty + 21;
+        end
+    end
+
+    // PWM 모듈 인스턴스 (모터 제어용)
+    pwm_Nstep_freq #(
+        .duty_step(100), 
+        .pwm_freq(100)
+    ) pwm_motor (
+        .clk(clk), 
+        .reset_p(reset_p), 
+        .duty(motor_duty),
+        .pwm(motor_pwm)
+    );
+    //-----------------------------------------------------------------------------------------------------------------------
+
+
+
+    // LED 밝기와 색상 제어----------------------------------------------------------------------------------------------------
+    reg [1:0] brightness_level;  // brightness_level 범위를 2비트로 수정
+    reg btn_brightness_last;      // btn_brightness의 이전 상태 추적
+    reg [2:0] color_state;
+    reg btn_color_last;           // btn_color의 이전 상태 추적
+
+    // 버튼 상태 변경 및 밝기 단계 조절
+    always @(posedge clk or posedge reset_p) begin
+        if (reset_p) begin
+            btn_brightness_last <= 1'b0;
+            brightness_level <= 2'b00;
+            led_duty <= 7'd0;  // 초기 듀티 사이클
+        end else begin
+            btn_brightness_last <= btn_light;
+
+            if (btn_light && !btn_brightness_last) begin
+                case (brightness_level)
+                    2'b00: begin
+                        brightness_level <= 2'b01; // 20% -> 60%
+                        led_duty <= 7'd25;         // 20% 듀티 사이클
+                    end
+                    2'b01: begin
+                        brightness_level <= 2'b10; // 60% -> 100%
+                        led_duty <= 7'd76;         // 60% 듀티 사이클
+                    end
+                    2'b10: begin
+                        brightness_level <= 2'b11; // 100% -> 20%
+                        led_duty <= 7'd127;        // 100% 듀티 사이클
+                    end
+                    2'b11: begin
+                        brightness_level <= 2'b00; // 100% -> 0%
+                        led_duty <= 7'd0;          // 0% 듀티 사이클
+                    end
+                endcase
+            end
+        end
+    end
+   //----------------------------------------------------------------------------------------------------------------------
+
+
+
+   // LED 색상 제어---------------------------------------------------------------------------------------------------------
+    always @(posedge clk or posedge reset_p) begin
+        if (reset_p) begin
+            btn_color_last <= 1'b0;
+            color_state <= 3'b000;
+            led_r <= 1'b0;
+            led_g <= 1'b0;
+            led_b <= 1'b0;
+        end else begin
+            btn_color_last <= btn_sple;
+
+            // 버튼이 눌렸을 때 색상 변경
+            if (btn_sple && !btn_color_last) begin
+                if (color_state == 3'b011) begin // 색상 단계
+                    color_state <= 3'b000;       // 색상 다시 초기화
+                end else begin
+                    color_state <= color_state + 1; // 색상 한 단계씩 업
+                end
+
+                case (color_state)
+                    3'b000: begin                     // 녹색
+                        led_r <= 1'b0;
+                        led_g <= 1'b1;
+                        led_b <= 1'b0;
+                    end
+                    3'b001: begin                    // 파랑색(노랑색이 티가 안나서 바꿈)
+                        led_r <= 1'b0;
+                        led_g <= 1'b0;
+                        led_b <= 1'b1;
+                    end
+                    3'b010: begin                    // 빨간색
+                        led_r <= 1'b1;
+                        led_g <= 1'b0;
+                        led_b <= 1'b0;
+                    end
+                    default: begin                   // 예외 처리 끔 (LED 끔)
+                        led_r <= 1'b0;
+                        led_g <= 1'b0;
+                        led_b <= 1'b0;
+                    end
+                endcase
+            end
+        end
+    end
+  //-----------------------------------------------------------------------------------------------------------------------
+   
+
+  // PWM 모듈 인스턴스 (LED 제어용)
+    genvar i;
+    generate
+        for (i = 0; i < 16; i = i + 1) begin : pwm_gen
+            pwm_100step pwm_inst (
+                .clk(clk),       // 클럭 신호
+                .reset_p(reset_p),
+                .duty(led_duty), // 듀티 사이클 설정
+                .pwm(led_pwm[i]) // 각 LED의 PWM 출력
+            );
+        end
+    endgenerate
+
+endmodule
